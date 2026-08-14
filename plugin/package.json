@@ -1,0 +1,35 @@
+{
+  "name": "ds-audit-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "bake": "tsx scripts/bake-prompt-data.ts",
+    "build": "npm run bake && build-figma-plugin --typecheck",
+    "watch": "npm run bake && build-figma-plugin --typecheck --watch"
+  },
+  "figma-plugin": {
+    "editorType": ["figma"],
+    "id": "0000000000000000000",
+    "name": "DS Audit",
+    "main": "src/code.ts",
+    "ui": "src/ui.tsx",
+    "documentAccess": "dynamic-page",
+    "networkAccess": {
+      "allowedDomains": ["none"],
+      "devAllowedDomains": ["http://localhost:8787"]
+    }
+  },
+  "dependencies": {
+    "@create-figma-plugin/ui": "4.0.3",
+    "@create-figma-plugin/utilities": "4.0.3",
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@create-figma-plugin/build": "4.0.3",
+    "@create-figma-plugin/tsconfig": "4.0.3",
+    "@figma/plugin-typings": "1.133.0",
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
