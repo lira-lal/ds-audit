@@ -61,6 +61,8 @@ ${exceptions}
 - 유사도를 단정하지 않는다. **차이점이 "—"이거나 빈 문자열이면 그 판정은 무효다 — 이 경우 결과와 심각도도 반드시 "문제 없음"/"—"으로 되돌린다. 차이점을 못 채우면서 심각도만 매기는 것은 절대 금지.**
 - kind가 instance인데 overriddenFields가 없거나 비어있으면 결과는 반드시 "문제 없음"이다. 다른 판정을 내리려면 어느 필드가 왜 바뀌었는지 차이점 칸에 구체적으로 적어야 한다.
 - **같은 노드(nodeId)는 findings에 행을 하나만 낸다.** 한 요소가 값 직접 입력·크기 고정값 변경·layoutPositioning 오버라이드처럼 여러 판정 기준에 동시에 걸려도 findings 배열에 항목을 여러 개 만들지 마라 — 하나로 합쳐서 결과·차이점 칸에 모든 사유를 나열하고, 심각도는 그중 가장 높은 것(심각 > 보통 > 경미)으로 쓴다. 같은 이름이라도 nodeId가 다른 별개의 인스턴스면 각각 별도 행이다.
+- 유형은 어긋난 속성에서 기계적으로 정한다 — fills/strokes는 컬러, cornerRadius는 모서리, itemSpacing/padding은 간격, width/height는 크기, 인스턴스가 아니거나 상태가 확정이 아니면 컴포넌트. 여러 개면 전부 적고, 컴포넌트가 있으면 맨 앞에 둔다.
+- **자동 수정 여부는 판정하지 않는다.** 어느 노드의 어느 속성을 어느 변수에 연결할지는 플러그인이 구조 데이터로 직접 계산한다. 변수명을 지어내서 액션에 적지 마라.
 - nodeId 칸에는 입력 데이터의 해당 element.nodeId 값을 그대로 적는다 (지어내지 않는다). **요소명 칸에는 레이어명만 적고 nodeId를 괄호로 덧붙이지 않는다** — 구분용 nodeId는 별도 칸에 있다.
 - 구조 데이터를 못 받은 요소는 분류를 배정하지 않는다.
 - exceptions.md 항목을 출력에서 빼지 않는다. "예외 승인"으로 표기만 한다.
@@ -78,18 +80,15 @@ ${exceptions}
   "findings": [
     {
       "요소명": "string (레이어명만, nodeId 붙이지 않음)", "위치": "string", "nodeId": "string (입력 데이터의 element.nodeId 그대로)",
+      "유형": ["컬러 | 모서리 | 간격 | 크기 | 타이포 | 컴포넌트 중 해당하는 것 전부"],
       "출처": "라이브러리 | 직접 그림 | —",
       "결과": "string", "유사기존": "string", "차이점": "string", "액션": "string",
       "심각도": "심각 | 보통 | 경미 | —"
     }
   ],
   "summary": { "문제없음": 0, "심각": 0, "보통": 0, "경미": 0, "예외": 0, "확인불가": 0 },
-  "updateSuggestions": [ { "대상파일": "string", "제안": "string", "상태": "string" } ],
-  "previousItemsStatus": [ { "요소명": "string", "이전심각도": "string", "상태": "해소 | 미해소 | 확인 필요", "근거": "string" } ],
-  "newFindings": [ "findings와 같은 형식의 배열" ]
-}
-
-previousItemsStatus와 newFindings는 재검수 요청(이전 결과가 함께 주어졌을 때)에만 채운다. 최초 검수라면 이 두 필드는 빈 배열로 둔다.`
+  "updateSuggestions": [ { "대상파일": "string", "제안": "string", "상태": "string" } ]
+}`
 
 const output = `// 이 파일은 scripts/bake-prompt-data.ts가 자동 생성한다. 직접 수정하지 말 것.
 // 원본: ${Object.values(paths).map((p) => p.replace(dsRoot, '~/ds')).join(', ')}

@@ -1,326 +1,483 @@
-import { h, JSX } from 'preact'
+import { Fragment, h, JSX } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
-import {
-  Button,
-  Container,
-  Divider,
-  Dropdown,
-  DropdownOption,
-  IconButton,
-  IconInfo16,
-  LoadingIndicator,
-  render,
-  Tabs,
-  Text,
-  VerticalSpace
-} from '@create-figma-plugin/ui'
+import { render } from '@create-figma-plugin/ui'
 
-import type { AuditResult, Finding, MainToUiMessage, ModelId, UiToMainMessage } from './types'
+import { Icon } from './icons'
+import { C, FONT, HAIRLINE, R, S, T, sevColor, tint } from './tokens'
+import type { AuditResult, Finding, FixPlan, MainToUiMessage, ModelId, UiToMainMessage, ViolationType } from './types'
 
-const MODEL_OPTIONS: Array<DropdownOption> = [
-  { value: 'claude-opus-5', text: 'Claude Opus 5 (권장 — 판단력)' },
-  { value: 'claude-sonnet-5', text: 'Claude Sonnet 5 (비용 절감)' }
-]
-
-function postToMain(message: UiToMainMessage): void {
+function post(message: UiToMainMessage): void {
   parent.postMessage({ pluginMessage: message }, '*')
 }
 
-function severityColor(severity: string): string {
-  return severity === '심각' ? '#d32f2f' : severity === '보통' ? '#e08a00' : severity === '경미' ? '#6b6b6b' : '#999'
+// ── 위반 유형 → 화면 문구. criteria.md의 판정과 1:1로 붙는다.
+const TYPE_TITLE: Record<ViolationType, string> = {
+  컬러: '컬러 변수 미사용',
+  모서리: '모서리 변수 미사용',
+  간격: '간격 변수 미사용',
+  크기: '고정 크기 직접 입력',
+  타이포: '텍스트 스타일 미사용',
+  컴포넌트: '컴포넌트 미사용'
+}
+const TYPE_PREFIX: Record<ViolationType, string> = {
+  컬러: '배경색', 모서리: '모서리', 간격: '여백', 크기: '크기', 타이포: '글꼴', 컴포넌트: ''
 }
 
-const SEVERITY_RANK: Record<string, number> = { 심각: 0, 보통: 1, 경미: 2 }
-function severityRank(severity: string): number {
-  return SEVERITY_RANK[severity] ?? 3
-}
-function sortBySeverity(findings: Finding[]): Finding[] {
-  return [...findings].sort((a, b) => severityRank(a.심각도) - severityRank(b.심각도))
-}
+const SEV_ORDER = ['심각', '보통', '경미']
+const rank = (s: string) => { const i = SEV_ORDER.indexOf(s); return i < 0 ? 9 : i }
 
-const STATUS_RANK: Record<string, number> = { 미해소: 0, '확인 필요': 1, 해소: 2 }
-function sortByStatus<T extends { 상태: string }>(items: T[]): T[] {
-  return [...items].sort((a, b) => (STATUS_RANK[a.상태] ?? 3) - (STATUS_RANK[b.상태] ?? 3))
-}
+// ─────────────────────────────── 부품
 
-interface ComponentGroup {
-  name: string
-  items: Finding[]
-}
-
-// 같은 컴포넌트(요소명)의 여러 인스턴스를 한 그룹으로 묶는다 — 그룹 순서는 그룹 안에서 가장 심각한 항목 기준.
-function groupByComponent(findings: Finding[]): ComponentGroup[] {
-  const order: string[] = []
-  const map = new Map<string, Finding[]>()
-  for (const f of findings) {
-    if (!map.has(f.요소명)) {
-      map.set(f.요소명, [])
-      order.push(f.요소명)
-    }
-    map.get(f.요소명)!.push(f)
-  }
-  return order
-    .map((name) => ({ name, items: sortBySeverity(map.get(name) as Finding[]) }))
-    .sort((a, b) => severityRank(a.items[0].심각도) - severityRank(b.items[0].심각도))
-}
-
-const EMPTY_VALUES = new Set(['—', '', '-'])
-const isFilled = (v: string | undefined) => v !== undefined && !EMPTY_VALUES.has(v)
-
-function BulletLine({ children }: { children: JSX.Element | JSX.Element[] }): JSX.Element {
+function Block({ children, gap = S.sm }: { children: preact.ComponentChildren; gap?: number }): JSX.Element {
   return (
-    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-      <span style={{ color: '#c5c5c5' }}>•</span>
-      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+    <div style={{ background: C.surfaceCard, borderRadius: R.md, padding: 14, display: 'flex', flexDirection: 'column', gap }}>
+      {children}
     </div>
   )
 }
 
-function FindingCard({ f }: { f: Finding }): JSX.Element {
+function SectionLabel({ children }: { children: preact.ComponentChildren }): JSX.Element {
+  return <div style={{ ...T.labelStrong, color: C.textMuted }}>{children}</div>
+}
+
+function IconButton({ name, onClick, label }: { name: ' 설정' | '설정' | '뒤로'; onClick: () => void; label: string }): JSX.Element {
   return (
-    <div
+    <button
+      aria-label={label}
+      onClick={onClick}
       style={{
-        border: '1px solid var(--figma-color-border, #e5e5e5)',
-        borderRadius: 6,
-        padding: 12,
-        marginBottom: 8
+        width: 28, height: 28, borderRadius: R.md, background: C.surfaceCard,
+        border: `${HAIRLINE}px solid ${C.lineHairline}`, display: 'flex',
+        alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0, flex: 'none'
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-        <Text>
-          <b>{f.요소명}</b>
-        </Text>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {isFilled(f.nodeId) && (
-            <span
-              style={{ color: '#0d99ff', fontSize: 11, cursor: 'pointer', whiteSpace: 'nowrap' }}
-              onClick={() => postToMain({ type: 'focus-node', nodeId: f.nodeId })}
-            >
-              이동
+      <Icon name={name.trim() as '설정' | '뒤로'} size={14} color={C.textStrong} />
+    </button>
+  )
+}
+
+function BarButton({ kind, label, onClick, disabled, grow = true, icon }: {
+  kind: 'primary' | 'subtle'
+  label: string
+  onClick?: () => void
+  disabled?: boolean
+  grow?: boolean
+  icon?: boolean
+}): JSX.Element {
+  const primary = kind === 'primary'
+  return (
+    <button
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      style={{
+        flex: grow ? 1 : 'none', minWidth: grow ? 0 : 107, height: 48, borderRadius: R.lg, border: 'none',
+        background: primary ? C.actionPrimary : C.surfaceSubtle,
+        color: primary ? C.textInverse : C.textStrong,
+        opacity: disabled ? 0.35 : 1, cursor: disabled ? 'default' : 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, ...T.buttonBar
+      }}
+    >
+      {icon && <Icon name="반짝임" size={13} color={C.textInverse} />}
+      {label}
+    </button>
+  )
+}
+
+function BottomBar({ children }: { children: preact.ComponentChildren }): JSX.Element {
+  return (
+    <div style={{ flex: 'none', background: C.surfaceCard, padding: S.lg, display: 'flex', gap: 10 }}>{children}</div>
+  )
+}
+
+function TypeChip({ type, sev }: { type: ViolationType; sev: string }): JSX.Element {
+  const col = sevColor(sev)
+  return (
+    <div style={{
+      width: 20, height: 20, borderRadius: R.sm, background: tint(col),
+      display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none'
+    }}>
+      <Icon name={type} size={11} color={col} />
+    </div>
+  )
+}
+
+function ValueChip({ children }: { children: preact.ComponentChildren }): JSX.Element {
+  return (
+    <span style={{
+      background: C.surfaceChip, borderRadius: R.sm, padding: '2px 6px',
+      ...T.bodyDefault, color: C.textBody, whiteSpace: 'nowrap'
+    }}>{children}</span>
+  )
+}
+
+function ListItem({ f, fix, blockedReason, last }: {
+  f: Finding
+  fix?: FixPlan
+  blockedReason?: string
+  last: boolean
+}): JSX.Element {
+  const type = (f.유형 && f.유형[0]) || '컴포넌트'
+  return (
+    <div style={{
+      display: 'flex', gap: S.lg, alignItems: 'center', padding: '16px 0',
+      borderBottom: last ? 'none' : `${HAIRLINE}px solid ${C.lineHairline}`
+    }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: S.xs }}>
+        <div style={{ display: 'flex', gap: S.sm, alignItems: 'center' }}>
+          <TypeChip type={type} sev={f.심각도} />
+          <span style={{ ...T.titleItem, color: C.textStrong, whiteSpace: 'nowrap' }}>{TYPE_TITLE[type]}</span>
+          <span
+            onClick={() => post({ type: 'focus-node', nodeId: f.nodeId })}
+            style={{ display: 'inline-flex', gap: 4, alignItems: 'center', cursor: 'pointer', minWidth: 0 }}
+          >
+            <span style={{ ...T.labelMeta, color: C.textFaint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {f.요소명}
             </span>
-          )}
-          <span style={{ color: severityColor(f.심각도), fontWeight: 700, fontSize: 11, whiteSpace: 'nowrap' }}>
-            {f.심각도}
+            <Icon name="이동" size={6} color={C.textFaint} width={1} />
           </span>
         </div>
+
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', ...T.bodyDefault, color: C.textBody }}>
+          {fix ? (
+            <>
+              {TYPE_PREFIX[fix.유형] && <span>{TYPE_PREFIX[fix.유형]}</span>}
+              <ValueChip>{fix.현재값}</ValueChip>
+              <span>→</span>
+              <ValueChip>{fix.목표값}</ValueChip>
+            </>
+          ) : (
+            <span>{f.차이점 && f.차이점 !== '—' ? f.차이점 : f.결과}</span>
+          )}
+        </div>
+
+        {!fix && blockedReason && (
+          <div style={{ ...T.labelMeta, color: C.textFaint }}>자동 수정할 수 없어요 — {blockedReason}</div>
+        )}
       </div>
-      <Text style={{ color: '#999' }}>
-        {f.위치} · {f.출처}
-      </Text>
-      <VerticalSpace space="small" />
-      <BulletLine>
-        <Text>{f.결과}</Text>
-      </BulletLine>
-      {isFilled(f.유사기존) && (
-        <div>
-          <VerticalSpace space="extraSmall" />
-          <BulletLine>
-            <Text style={{ color: '#999' }}>유사 기존: {f.유사기존}</Text>
-          </BulletLine>
-        </div>
-      )}
-      {isFilled(f.차이점) && (
-        <div>
-          <VerticalSpace space="extraSmall" />
-          <BulletLine>
-            <Text>차이점: {f.차이점}</Text>
-          </BulletLine>
-        </div>
-      )}
-      {isFilled(f.액션) && (
-        <div>
-          <VerticalSpace space="extraSmall" />
-          <BulletLine>
-            <Text style={{ fontWeight: 600 }}>액션: {f.액션}</Text>
-          </BulletLine>
-        </div>
-      )}
-    </div>
-  )
-}
 
-function PreviousItemCard({
-  요소명,
-  이전심각도,
-  상태,
-  근거
-}: {
-  요소명: string
-  이전심각도: string
-  상태: string
-  근거: string
-}): JSX.Element {
-  return (
-    <div
-      style={{
-        border: '1px solid var(--figma-color-border, #e5e5e5)',
-        borderRadius: 6,
-        padding: 12,
-        marginBottom: 8
-      }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-        <Text>
-          <b>{요소명}</b>
-        </Text>
-        <Text style={{ color: '#999', whiteSpace: 'nowrap' }}>이전: {이전심각도}</Text>
-      </div>
-      <VerticalSpace space="small" />
-      <BulletLine>
-        <Text style={{ fontWeight: 600 }}>{상태}</Text>
-      </BulletLine>
-      <VerticalSpace space="extraSmall" />
-      <BulletLine>
-        <Text>{근거}</Text>
-      </BulletLine>
-    </div>
-  )
-}
-
-function CriteriaPanel(): JSX.Element {
-  const [open, setOpen] = useState(false)
-  return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        <Text style={{ fontWeight: 600 }}>판정 기준</Text>
-        <IconButton onClick={() => setOpen((v) => !v)}>
-          <IconInfo16 />
-        </IconButton>
-      </div>
-      {open && (
-        <div
-          style={{
-            border: '1px solid var(--figma-color-border, #e5e5e5)',
-            borderRadius: 6,
-            padding: 12,
-            marginTop: 4,
-            marginBottom: 8
-          }}
-        >
-          <Text style={{ fontWeight: 600 }}>심각도</Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>
-            심각 — 시스템 원칙을 깬 것, 반드시 수정 (색·글꼴·모서리를 변수 연결 없이 값 직접 입력)
-          </Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>
-            보통 — 고쳐야 하나 급하지 않음 (_deprecated 컴포넌트 사용 / 유사품 있는데 직접 그림 / 크기 고정값·여백 변경 /
-            색·글꼴·모서리를 다른 등록된 변수로 교체)
-          </Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>경미 — 기록만 (_wip 컴포넌트 사용 / 유사품 없는데 직접 그림)</Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>예외 — exceptions.md에 등록되어 승인된 항목</Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>확인불가 — 구조 데이터를 읽지 못해 판정을 내릴 수 없음</Text>
-          <VerticalSpace space="small" />
-          <Text style={{ fontWeight: 600 }}>판정 순서 (위에서부터, 맞는 항목이 나오면 멈춤)</Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>
-            예외 등록 확인 → 라이브러리 컴포넌트 인스턴스인지 → _deprecated 여부 → _wip 여부 → 값 변경 여부
-            (변경됐다면 변수 연결 없이 직접 입력했는지, 아니면 다른 등록된 변수로 교체했는지로 심각도 구분) →
-            (인스턴스가 아니면) 유사품 존재 여부 (근거 2개 이상 일치 시만 인정)
-          </Text>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ComponentGroupBlock({ group }: { group: ComponentGroup }): JSX.Element {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <Text style={{ fontWeight: 600 }}>
-        {group.name} <span style={{ color: '#999', fontWeight: 400 }}>({group.items.length}건)</span>
-      </Text>
-      <VerticalSpace space="extraSmall" />
-      {group.items.map((f, i) => (
-        <FindingCard key={i} f={f} />
-      ))}
-    </div>
-  )
-}
-
-function ResultsTable({ result }: { result: AuditResult }): JSX.Element {
-  return (
-    <div>
-      <Text>
-        <b>{result.frameName}</b> — {new Date(result.savedAt).toLocaleString()}
-      </Text>
-      <VerticalSpace space="small" />
-      <Text>
-        문제없음 {result.summary.문제없음} / 심각 {result.summary.심각} / 보통 {result.summary.보통} / 경미{' '}
-        {result.summary.경미} / 예외 {result.summary.예외} / 확인불가 {result.summary.확인불가}
-      </Text>
-      <VerticalSpace space="medium" />
-      {groupByComponent(result.findings).map((g, i) => (
-        <ComponentGroupBlock key={i} group={g} />
-      ))}
-      {result.previousItemsStatus && result.previousItemsStatus.length > 0 && (
-        <div>
-          <VerticalSpace space="medium" />
-          <Text>
-            <b>이전 항목 처리 결과</b>
-          </Text>
-          <VerticalSpace space="small" />
-          {sortByStatus(result.previousItemsStatus).map((p, i) => (
-            <PreviousItemCard key={i} 요소명={p.요소명} 이전심각도={p.이전심각도} 상태={p.상태} 근거={p.근거} />
-          ))}
-        </div>
-      )}
-      {result.newFindings && result.newFindings.length > 0 && (
-        <div>
-          <VerticalSpace space="medium" />
-          <Text>
-            <b>신규 발생 항목</b>
-          </Text>
-          <VerticalSpace space="small" />
-          {groupByComponent(result.newFindings).map((g, i) => (
-            <ComponentGroupBlock key={i} group={g} />
-          ))}
-        </div>
-      )}
-      <VerticalSpace space="medium" />
-      <Button
-        secondary
-        fullWidth
-        onClick={() => {
-          const md = toMarkdown(result)
-          const blob = new Blob([md], { type: 'text/markdown' })
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-          a.download = `${new Date(result.savedAt).toISOString().slice(0, 10)}_${result.frameName}.md`
-          a.click()
-          URL.revokeObjectURL(url)
+      <button
+        onClick={fix ? () => post({ type: 'apply-fixes', nodeIds: [f.nodeId] }) : undefined}
+        disabled={!fix}
+        style={{
+          width: 42, height: 28, borderRadius: R.md, border: 'none', flex: 'none',
+          background: fix ? C.actionPrimary : C.surfaceMuted,
+          color: fix ? C.textInverse : C.textFaint,
+          cursor: fix ? 'pointer' : 'default', ...T.buttonSmall
         }}
       >
-        마크다운으로 내보내기
-      </Button>
+        {fix ? 'fix' : '수동'}
+      </button>
     </div>
   )
 }
 
-function toMarkdown(result: AuditResult): string {
-  const header = '| 요소명 | 위치 | 출처 | 결과 | 유사 기존 | 차이점 | 액션 | 심각도 |\n|---|---|---|---|---|---|---|---|'
-  const rows = groupByComponent(result.findings)
-    .flatMap((g) => g.items)
-    .map((f) => `| ${f.요소명} | ${f.위치} | ${f.출처} | ${f.결과} | ${f.유사기존} | ${f.차이점} | ${f.액션} | ${f.심각도} |`)
-    .join('\n')
-  const s = result.summary
-  const summaryLine = `문제없음 ${s.문제없음} / 심각 ${s.심각} / 보통 ${s.보통} / 경미 ${s.경미} / 예외 ${s.예외} / 확인불가 ${s.확인불가}`
-  return `${header}\n${rows}\n\n${summaryLine}\n`
+// ─────────────────────────────── 화면
+
+function PrepareScreen({ selection, model, serverOk, loading, progress, error, onStart, onSettings }: {
+  selection: string[]
+  model: ModelId
+  serverOk: boolean | null
+  loading: boolean
+  progress: { done: number; total: number; currentFrame: string } | null
+  error: string | null
+  onStart: () => void
+  onSettings: () => void
+}): JSX.Element {
+  const empty = selection.length === 0
+  const pct = progress && progress.total ? Math.round((progress.done / progress.total) * 100) : 0
+  return (
+    <>
+      <div style={{ flex: 1, overflowY: 'auto', padding: `12px ${S.lg}px`, display: 'flex', flexDirection: 'column', gap: S.lg }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: S.md }}>
+          <div style={{ flex: 1, ...T.titlePage, color: C.actionPrimary }}>검수 준비</div>
+          <IconButton name="설정" label="설정" onClick={onSettings} />
+        </div>
+
+        <SectionLabel>검수 대상</SectionLabel>
+        {loading ? (
+          <Block gap={10}>
+            <div style={{ ...T.titleItem, color: C.textStrong }}>
+              {progress ? `${progress.total}개 프레임을 대조하고 있습니다.` : '대조하고 있습니다.'}
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: C.surfaceChip, overflow: 'hidden' }}>
+              <div style={{ width: `${pct}%`, height: '100%', borderRadius: 3, background: C.actionPrimary }} />
+            </div>
+            {progress && progress.currentFrame && (
+              <div style={{ ...T.bodyDefault, color: C.textBody }}>{progress.currentFrame} 진행 중</div>
+            )}
+          </Block>
+        ) : empty ? (
+          <Block>
+            <div style={{ ...T.titleItem, color: C.textStrong }}>선택된 프레임이 없습니다.</div>
+            <div style={{ ...T.bodyDefault, color: C.textBody }}>
+              캔버스에서 검수할 프레임을 하나 이상 선택해 주세요. 여러 개를 한 번에 고를 수 있어요.
+            </div>
+          </Block>
+        ) : (
+          <Block gap={10}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+              <span style={{ ...T.numHero, color: C.actionPrimary }}>{selection.length}</span>
+              <span style={{ ...T.bodyDefault, color: C.textMuted }}>개 프레임 선택됨</span>
+            </div>
+            <div style={{ height: 1, background: C.lineDefault }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {selection.map((n, i) => (
+                <div key={i} style={{ ...T.bodyItem, color: C.textStrong, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n}</div>
+              ))}
+            </div>
+          </Block>
+        )}
+
+        <SectionLabel>실행 환경</SectionLabel>
+        <Block gap={10}>
+          <StatusRow on={serverOk !== false} text={serverOk === false ? '릴레이 서버에 연결하지 못했습니다.' : '릴레이 서버 연결됨'} />
+          <StatusRow on={false} text={model === 'claude-opus-5' ? 'Claude Opus 5' : 'Claude Sonnet 5'} action="변경" onAction={onSettings} />
+          {error && (
+            <div style={{ ...T.bodyDefault, color: C.sev심각 }}>{error}</div>
+          )}
+          {serverOk === false && (
+            <div style={{ background: C.surfaceChip, borderRadius: R.sm, padding: '6px 8px', ...T.bodyDefault, color: C.textBody, wordBreak: 'break-all' }}>
+              cd relay-server &amp;&amp; npm start
+            </div>
+          )}
+        </Block>
+      </div>
+
+      <BottomBar>
+        <BarButton
+          kind="primary"
+          label={loading ? '검수 중…' : serverOk === false ? '다시 시도' : '검수 시작'}
+          disabled={loading || empty}
+          onClick={onStart}
+        />
+      </BottomBar>
+    </>
+  )
 }
 
+function StatusRow({ on, text, action, onAction }: { on: boolean; text: string; action?: string; onAction?: () => void }): JSX.Element {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: S.sm }}>
+      <span style={{ width: 7, height: 7, borderRadius: '50%', background: on ? C.stateOn : C.stateIdle, flex: 'none' }} />
+      <span style={{ flex: 1, ...T.bodyDefault, color: C.textStrong }}>{text}</span>
+      {action && <span onClick={onAction} style={{ ...T.bodyDefault, color: C.textMuted, cursor: 'pointer' }}>{action}</span>}
+    </div>
+  )
+}
+
+function SettingsScreen({ model, onModel, onBack, onTest, testResult }: {
+  model: ModelId
+  onModel: (m: ModelId) => void
+  onBack: () => void
+  onTest: () => void
+  testResult: { ok: boolean; message: string } | null
+}): JSX.Element {
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: `12px ${S.lg}px`, display: 'flex', flexDirection: 'column', gap: S.lg }}>
+      <div style={{ display: 'flex', paddingBottom: 2 }}>
+        <IconButton name="뒤로" label="뒤로" onClick={onBack} />
+      </div>
+      <div style={{ ...T.titlePage, color: C.actionPrimary }}>설정</div>
+
+      <SectionLabel>연결 방식</SectionLabel>
+      <Block>
+        <div style={{ ...T.bodyDefault, color: C.textBody }}>
+          API 키 없이, 이미 로그인된 Claude Code 구독으로 검수합니다. 시안 데이터는 이 맥 밖으로 나가지 않아요.
+        </div>
+        <div style={{ background: C.surfaceChip, borderRadius: R.sm, padding: '6px 8px', ...T.bodyDefault, color: C.textBody, wordBreak: 'break-all' }}>
+          cd relay-server &amp;&amp; npm start
+        </div>
+      </Block>
+
+      <SectionLabel>모델</SectionLabel>
+      <Block gap={0}>
+        {([
+          ['claude-opus-5', 'Claude Opus 5', '판단력 우선 · 권장'],
+          ['claude-sonnet-5', 'Claude Sonnet 5', '비용 절감']
+        ] as Array<[ModelId, string, string]>).map(([id, name, desc], i) => (
+          <div
+            key={id}
+            onClick={() => onModel(id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', cursor: 'pointer',
+              borderTop: i > 0 ? `${HAIRLINE}px solid ${C.lineDefault}` : 'none'
+            }}
+          >
+            <span style={{
+              width: 14, height: 14, borderRadius: '50%', flex: 'none',
+              border: model === id ? `4px solid ${C.actionPrimary}` : `1px solid ${C.lineHairline}`,
+              background: C.surfaceCard
+            }} />
+            <span style={{ flex: 1 }}>
+              <span style={{ display: 'block', ...T.bodyItem, fontWeight: model === id ? 700 : 400, color: C.textStrong }}>{name}</span>
+              <span style={{ display: 'block', ...T.labelMeta, color: C.textFaint }}>{desc}</span>
+            </span>
+          </div>
+        ))}
+      </Block>
+
+      <SectionLabel>연결 상태</SectionLabel>
+      <Block gap={10}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: S.sm }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: testResult?.ok ? C.stateOn : C.stateIdle, flex: 'none' }} />
+          <span style={{ flex: 1, ...T.bodyDefault, color: C.textStrong, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {testResult ? testResult.message : '아직 확인하지 않았어요'}
+          </span>
+          <button
+            onClick={onTest}
+            style={{
+              height: 28, padding: '0 12px', borderRadius: R.md, border: 'none', flex: 'none',
+              background: C.actionPrimary, color: C.textInverse, cursor: 'pointer', ...T.bodyDefault, fontWeight: 600
+            }}
+          >
+            연결 테스트
+          </button>
+        </div>
+        {testResult && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: S.xs }}>
+            <Icon name="체크" size={12} color={testResult.ok ? C.stateOn : C.sev심각} />
+            <span style={{ ...T.bodyDefault, color: testResult.ok ? C.stateOn : C.sev심각 }}>
+              {testResult.ok ? '연결 성공' : '연결 실패'}
+            </span>
+          </div>
+        )}
+      </Block>
+    </div>
+  )
+}
+
+function ResultScreen({ results, active, onActive, onSettings, onFixAll, onClose, fixedCount }: {
+  results: AuditResult[]
+  active: number
+  onActive: (i: number) => void
+  onSettings: () => void
+  onFixAll: () => void
+  onClose: () => void
+  fixedCount: number | null
+}): JSX.Element {
+  const r = results[active]
+  const fixByNode = new Map<string, FixPlan>()
+  for (const p of r.fixes) if (!fixByNode.has(p.nodeId)) fixByNode.set(p.nodeId, p)
+  const blockedByNode = new Map<string, string>()
+  for (const b of r.blocked) blockedByNode.set(b.nodeId, b.사유)
+
+  const groups: Array<[string, Finding[]]> = []
+  for (const sev of SEV_ORDER) {
+    const items = r.findings.filter((f) => f.심각도 === sev).sort((a, b) => rank(a.심각도) - rank(b.심각도))
+    if (items.length) groups.push([sev, items])
+  }
+  const fixable = r.fixes.length
+  const total = r.findings.length
+  const when = new Date(r.savedAt)
+  const meta = `${when.getMonth() + 1}월 ${when.getDate()}일 ${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')} · 프레임 ${results.length}개`
+
+  return (
+    <>
+      <div style={{ flex: 1, overflowY: 'auto', padding: `12px ${S.lg}px`, display: 'flex', flexDirection: 'column', gap: S.xl }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: S.xl }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: S.md }}>
+            <div style={{ flex: 1, ...T.titlePage, color: C.actionPrimary }}>검수 결과</div>
+            <IconButton name="설정" label="설정" onClick={onSettings} />
+          </div>
+          <div style={{ ...T.bodyDefault, color: C.textMuted, marginTop: -16 }}>{meta}</div>
+
+          {results.length > 1 && (
+            <div style={{ borderBottom: `${HAIRLINE}px solid ${C.lineDefault}`, display: 'flex', gap: 20 }}>
+              {results.map((x, i) => {
+                const on = i === active
+                return (
+                  <div key={i} onClick={() => onActive(i)} style={{
+                    paddingBottom: 9, cursor: 'pointer',
+                    borderBottom: on ? `2px solid ${C.actionPrimary}` : '2px solid transparent',
+                    display: 'flex', alignItems: 'center', gap: 6
+                  }}>
+                    <span style={{ ...T.labelTab, fontWeight: on ? 700 : 500, color: on ? C.textStrong : C.textFaint, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {x.frameName}
+                    </span>
+                    <span style={{ background: C.surfaceMuted, borderRadius: R.full, padding: '1px 6px', ...T.labelStrong, color: x.findings.length ? C.textStrong : C.textFaint }}>
+                      {x.findings.length}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', border: `${HAIRLINE}px solid ${C.lineDefault}`, borderRadius: R.md, background: C.surfaceCard, overflow: 'hidden' }}>
+            {([['심각', r.summary.심각, C.sev심각], ['보통', r.summary.보통, C.sev보통], ['경미', r.summary.경미, null], ['문제없음', r.summary.문제없음, null]] as Array<[string, number, string | null]>).map(([label, n, col], i) => (
+              <div key={label} style={{
+                flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px',
+                borderLeft: i > 0 ? `${HAIRLINE}px solid ${C.lineDefault}` : 'none'
+              }}>
+                <span style={{ flex: 1, ...T.labelMicro, color: col ?? C.textMuted }}>{label}</span>
+                <span style={{ ...T.labelStrong, color: col ?? (n > 0 ? C.textStrong : C.textFaint) }}>{n}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {fixedCount !== null && (
+          <Block gap={6}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: S.sm }}>
+              <Icon name="체크" size={14} color={C.sev문제없음} width={1.8} />
+              <span style={{ ...T.titleItem, color: C.textStrong }}>{fixedCount}건을 수정했습니다.</span>
+            </div>
+            <div style={{ ...T.bodyDefault, color: C.textBody }}>
+              되돌리려면 Cmd+Z를 누르세요.{total > 0 ? ` 남은 ${total}건은 직접 판단해야 해요.` : ''}
+            </div>
+          </Block>
+        )}
+
+        {groups.length === 0 ? (
+          <Block>
+            <div style={{ ...T.titleItem, color: C.textStrong }}>어긋난 곳이 없습니다.</div>
+            <div style={{ ...T.bodyDefault, color: C.textBody }}>
+              모든 요소가 라이브러리 컴포넌트를 쓰고 있고, 값도 등록된 변수에 연결돼 있어요.
+            </div>
+          </Block>
+        ) : (
+          groups.map(([sev, items]) => (
+            <div key={sev} style={{ display: 'flex', flexDirection: 'column', gap: S.sm }}>
+              <div style={{ ...T.titleGroup, color: sevColor(sev), padding: '0 4px' }}>{sev}</div>
+              <div style={{ background: C.surfaceCard, borderRadius: R.md, padding: '0 14px' }}>
+                {items.map((f, i) => (
+                  <ListItem
+                    key={f.nodeId + i}
+                    f={f}
+                    fix={fixByNode.get(f.nodeId)}
+                    blockedReason={blockedByNode.get(f.nodeId)}
+                    last={i === items.length - 1}
+                  />
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <BottomBar>
+        {fixable > 0 && <BarButton kind="primary" icon label={`자동 수정 (${fixable}건)`} onClick={onFixAll} />}
+        <BarButton kind="subtle" label="종료" grow={fixable === 0} onClick={onClose} />
+      </BottomBar>
+    </>
+  )
+}
+
+// ─────────────────────────────── 본체
+
 function Plugin(): JSX.Element {
-  const [tab, setTab] = useState<string>('run')
+  const [screen, setScreen] = useState<'prepare' | 'settings' | 'result'>('prepare')
+  const [prev, setPrev] = useState<'prepare' | 'result'>('prepare')
   const [model, setModel] = useState<ModelId>('claude-opus-5')
-  const [selectionSummary, setSelectionSummary] = useState('(선택 없음)')
-  const [hasPrevious, setHasPrevious] = useState(false)
+  const [selection, setSelection] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [testMessage, setTestMessage] = useState<string | null>(null)
+  const [progress, setProgress] = useState<{ done: number; total: number; currentFrame: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [serverOk, setServerOk] = useState<boolean | null>(null)
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [results, setResults] = useState<AuditResult[]>([])
+  const [active, setActive] = useState(0)
+  const [fixedCount, setFixedCount] = useState<number | null>(null)
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -328,156 +485,65 @@ function Plugin(): JSX.Element {
       if (!msg) return
       switch (msg.type) {
         case 'init':
-          setModel(msg.model)
-          setSelectionSummary(msg.selectionSummary)
-          setHasPrevious(msg.hasPreviousForSelection)
-          break
+          setModel(msg.model); setSelection(msg.selection); break
         case 'selection-changed':
-          setSelectionSummary(msg.selectionSummary)
-          setHasPrevious(msg.hasPreviousForSelection)
-          break
+          setSelection(msg.selection); break
         case 'audit-started':
-          setLoading(true)
-          setErrorMessage(null)
-          break
+          setLoading(true); setError(null); setProgress(null); setFixedCount(null); break
+        case 'audit-progress':
+          setProgress({ done: msg.done, total: msg.total, currentFrame: msg.currentFrame }); break
         case 'audit-result':
-          setLoading(false)
-          setResults(msg.results)
-          setTab('result')
-          break
+          setLoading(false); setProgress(null); setResults(msg.results); setActive(0); setServerOk(true); setScreen('result'); break
         case 'audit-error':
-          setLoading(false)
-          setErrorMessage(msg.message)
+          setLoading(false); setProgress(null); setError(msg.message)
+          if (msg.message.indexOf('연결') !== -1) setServerOk(false)
           break
         case 'test-connection-result':
-          setTestMessage(msg.ok ? `성공: ${msg.message}` : `실패: ${msg.message}`)
-          break
+          setTestResult({ ok: msg.ok, message: msg.message }); setServerOk(msg.ok); break
+        case 'fix-result': {
+          const ok = msg.outcomes.filter((o) => o.ok).length
+          setResults(msg.results); setFixedCount(ok); break
+        }
       }
     }
     window.addEventListener('message', handler)
-    postToMain({ type: 'request-history' })
     return () => window.removeEventListener('message', handler)
   }, [])
 
+  const openSettings = () => { setPrev(screen === 'result' ? 'result' : 'prepare'); setScreen('settings') }
+
   return (
-    <Container space="medium">
-      <VerticalSpace space="small" />
-      <Tabs
-        value={tab}
-        onValueChange={setTab}
-        options={[
-          { value: 'run', children: '실행' },
-          { value: 'settings', children: '설정' },
-          { value: 'result', children: '결과' }
-        ]}
-      />
-      <VerticalSpace space="small" />
-
-      {tab === 'run' && (
-        <div>
-          <Text>선택된 프레임: {selectionSummary}</Text>
-          <VerticalSpace space="small" />
-          <Text style={{ color: '#999' }}>
-            로컬 relay-server가 켜져 있어야 한다 (터미널: cd relay-server && npm start)
-          </Text>
-          <VerticalSpace space="small" />
-          <Button fullWidth disabled={loading} loading={loading} onClick={() => postToMain({ type: 'run-audit' })}>
-            검수 시작
-          </Button>
-          {hasPrevious && (
-            <div>
-              <VerticalSpace space="small" />
-              <Button
-                secondary
-                fullWidth
-                disabled={loading}
-                onClick={() => postToMain({ type: 'run-audit', reAudit: true })}
-              >
-                이전 실행과 재검수
-              </Button>
-            </div>
-          )}
-          {loading && (
-            <div>
-              <VerticalSpace space="small" />
-              <LoadingIndicator />
-            </div>
-          )}
-          {errorMessage && (
-            <div>
-              <VerticalSpace space="small" />
-              <Text style={{ color: '#d32f2f' }}>{errorMessage}</Text>
-            </div>
-          )}
-        </div>
+    <div style={{
+      width: '100%', height: '100vh', background: C.surfacePage, fontFamily: FONT,
+      display: 'flex', flexDirection: 'column', color: C.textStrong, boxSizing: 'border-box'
+    }}>
+      {screen === 'prepare' && (
+        <PrepareScreen
+          selection={selection} model={model} serverOk={serverOk}
+          loading={loading} progress={progress} error={error}
+          onStart={() => post({ type: 'run-audit' })}
+          onSettings={openSettings}
+        />
       )}
-
-      {tab === 'settings' && (
-        <div>
-          <Text>
-            <b>연결 방식</b>
-          </Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999' }}>
-            이 플러그인은 API 키 대신 로컬 relay-server를 통해 이미 로그인된 Claude Code 구독으로 검수를
-            처리한다. 검수 전에 터미널에서 아래를 실행해달라:
-          </Text>
-          <VerticalSpace space="extraSmall" />
-          <Text style={{ color: '#999', wordBreak: 'break-all' }}>cd relay-server && npm start</Text>
-          <VerticalSpace space="medium" />
-          <Divider />
-          <VerticalSpace space="medium" />
-          <Text>모델</Text>
-          <VerticalSpace space="extraSmall" />
-          <Dropdown
-            options={MODEL_OPTIONS}
-            value={model}
-            onValueChange={(v) => {
-              const m = v as ModelId
-              setModel(m)
-              postToMain({ type: 'save-model', model: m })
-            }}
-          />
-          <VerticalSpace space="medium" />
-          <Divider />
-          <VerticalSpace space="medium" />
-          <Button secondary onClick={() => postToMain({ type: 'test-connection' })}>
-            연결 테스트
-          </Button>
-          {testMessage && (
-            <div>
-              <VerticalSpace space="small" />
-              <Text>{testMessage}</Text>
-            </div>
-          )}
-        </div>
+      {screen === 'settings' && (
+        <SettingsScreen
+          model={model}
+          onModel={(m) => { setModel(m); post({ type: 'save-model', model: m }) }}
+          onBack={() => setScreen(prev)}
+          onTest={() => post({ type: 'test-connection' })}
+          testResult={testResult}
+        />
       )}
-
-      {tab === 'result' && (
-        <div>
-          <CriteriaPanel />
-          <VerticalSpace space="small" />
-          {results.length === 0 ? (
-            <Text>아직 검수 결과가 없다.</Text>
-          ) : (
-            results.map((r, i) => (
-              <div key={`${r.nodeId}-${r.savedAt}`}>
-                {i > 0 && (
-                  <div>
-                    <VerticalSpace space="medium" />
-                    <Divider />
-                    <VerticalSpace space="medium" />
-                  </div>
-                )}
-                <ResultsTable result={r} />
-              </div>
-            ))
-          )}
-        </div>
+      {screen === 'result' && results.length > 0 && (
+        <ResultScreen
+          results={results} active={active} onActive={setActive}
+          onSettings={openSettings}
+          onFixAll={() => post({ type: 'apply-fixes' })}
+          onClose={() => { setResults([]); setFixedCount(null); setScreen('prepare'); post({ type: 'go-back' }) }}
+          fixedCount={fixedCount}
+        />
       )}
-
-      <VerticalSpace space="medium" />
-    </Container>
+    </div>
   )
 }
 
