@@ -1,74 +1,48 @@
 import { showUI } from '@create-figma-plugin/utilities'
 import { extractFrame } from './extract'
+import { applyFixes, collectVariables, planFixes } from './autofix'
 import { describeError, judgeFrame, testConnection } from './claudeClient'
 import type {
   AuditResult,
+  FixPlan,
   InitMessage,
   MainToUiMessage,
   ModelId,
   SelectionChangedMessage,
+  Summary,
   UiToMainMessage
 } from './types'
 
 const MODEL_STORAGE_KEY = 'model'
 const DEFAULT_MODEL: ModelId = 'claude-opus-5'
 
-function historyStorageKey(fileKey: string, nodeId: string): string {
-  return `history:${fileKey}:${nodeId}`
-}
-
-async function listHistoryKeys(): Promise<string[]> {
-  const keys = await figma.clientStorage.keysAsync()
-  return keys.filter((k) => k.startsWith('history:'))
-}
+/** 마지막 검수 결과. 자동 수정은 이 결과를 기준으로 적용한다. */
+let lastResults: AuditResult[] = []
 
 function post(message: MainToUiMessage): void {
   figma.ui.postMessage(message)
 }
 
-function selectionSummary(): string {
-  const selection = figma.currentPage.selection
-  if (selection.length === 0) return '(선택 없음)'
-  return selection.map((n) => n.name).join(', ')
+/** 선택한 프레임 이름 목록. 화면이 개수와 목록을 따로 쓰므로 배열로 넘긴다. */
+function selection(): string[] {
+  return figma.currentPage.selection.map((n) => n.name)
 }
 
-async function hasPreviousForCurrentSelection(): Promise<boolean> {
-  const selection = figma.currentPage.selection
-  if (selection.length === 0) return false
-  const fileKey = figma.fileKey ?? '(local)'
-  for (const node of selection) {
-    const stored = await figma.clientStorage.getAsync(historyStorageKey(fileKey, node.id))
-    if (stored) return true
-  }
-  return false
-}
-
-async function sendSelectionChanged(): Promise<void> {
-  const message: SelectionChangedMessage = {
-    type: 'selection-changed',
-    selectionSummary: selectionSummary(),
-    historyKeys: await listHistoryKeys(),
-    hasPreviousForSelection: await hasPreviousForCurrentSelection()
-  }
+function sendSelectionChanged(): void {
+  const message: SelectionChangedMessage = { type: 'selection-changed', selection: selection() }
   post(message)
 }
 
 async function init(): Promise<void> {
   const model = (await figma.clientStorage.getAsync(MODEL_STORAGE_KEY)) ?? DEFAULT_MODEL
-  const message: InitMessage = {
-    type: 'init',
-    model,
-    selectionSummary: selectionSummary(),
-    historyKeys: await listHistoryKeys(),
-    hasPreviousForSelection: await hasPreviousForCurrentSelection()
-  }
+  const message: InitMessage = { type: 'init', model, selection: selection() }
   post(message)
 }
 
-async function runAudit(reAudit?: boolean): Promise<void> {
-  const selection = figma.currentPage.selection
-  if (selection.length === 0) {
-    post({ type: 'audit-error', message: '프레임을 하나 이상 선택해달라.' })
+async function runAudit(): Promise<void> {
+  const targets = figma.currentPage.selection
+  if (targets.length === 0) {
+    post({ type: 'audit-error', message: '검수할 프레임을 하나 이상 선택해 주세요.' })
     return
   }
   const model = (await figma.clientStorage.getAsync(MODEL_STORAGE_KEY)) ?? DEFAULT_MODEL
@@ -76,19 +50,17 @@ async function runAudit(reAudit?: boolean): Promise<void> {
 
   post({ type: 'audit-started' })
 
-  // 선택한 프레임(시안) 각각을 별도로 검수한다 — 하나로 합쳐서 판정하면 시안 구분이 사라진다.
+  // 값 비교용 변수 목록은 프레임마다 다시 읽을 이유가 없다
+  const vars = await collectVariables()
+
   const results: AuditResult[] = []
-  for (const target of selection) {
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i]
+    post({ type: 'audit-progress', done: i, total: targets.length, currentFrame: target.name })
     try {
       const extracted = await extractFrame(target, fileKey)
       if (extracted.skippedForSize) {
-        figma.notify(`${target.name}: 프레임이 커서 일부 요소는 건너뛰었다.`)
-      }
-
-      let previousResult: AuditResult | undefined
-      if (reAudit) {
-        const stored = await figma.clientStorage.getAsync(historyStorageKey(fileKey, target.id))
-        if (stored) previousResult = stored as AuditResult
+        figma.notify(`${target.name}: 프레임이 커서 일부 요소는 건너뛰었습니다.`)
       }
 
       const result = await judgeFrame({
@@ -96,12 +68,15 @@ async function runAudit(reAudit?: boolean): Promise<void> {
         extractedFrameJson: JSON.stringify(extracted),
         fileKey,
         nodeId: target.id,
-        frameName: target.name,
-        previousResult
+        frameName: target.name
       })
       result.savedAt = new Date().toISOString()
 
-      await figma.clientStorage.setAsync(historyStorageKey(fileKey, target.id), result)
+      // 판정은 모델이, 수정 계획은 여기서
+      const planned = planFixes(extracted, result.findings, vars)
+      result.fixes = planned.fixes
+      result.blocked = planned.blocked
+
       results.push(result)
     } catch (e) {
       figma.notify(`${target.name} 검수 실패: ${describeError(e)}`)
@@ -109,20 +84,65 @@ async function runAudit(reAudit?: boolean): Promise<void> {
   }
 
   if (results.length === 0) {
-    post({ type: 'audit-error', message: '선택한 프레임을 모두 검수하지 못했다.' })
+    post({ type: 'audit-error', message: '선택한 프레임을 모두 검수하지 못했습니다.' })
     return
   }
 
+  post({ type: 'audit-progress', done: targets.length, total: targets.length, currentFrame: '' })
+  lastResults = results
   post({ type: 'audit-result', results })
-  await sendSelectionChanged()
+}
+
+function recountSummary(findings: AuditResult['findings'], before: Summary): Summary {
+  const next: Summary = { ...before, 심각: 0, 보통: 0, 경미: 0 }
+  for (const f of findings) {
+    if (f.심각도 === '심각') next.심각++
+    else if (f.심각도 === '보통') next.보통++
+    else if (f.심각도 === '경미') next.경미++
+  }
+  return next
+}
+
+/**
+ * 수정을 적용한 뒤 결과에서 고쳐진 항목을 덜어낸다.
+ * 다시 검수하지 않는 이유: 고친 항목이 더 이상 위반이 아니라는 건 추론이 아니라
+ * 방금 우리가 한 일이라 확실하다. 재판정에 다시 비용을 쓸 이유가 없다.
+ */
+async function handleApplyFixes(nodeIds?: string[]): Promise<void> {
+  const wanted = nodeIds && nodeIds.length ? new Set(nodeIds) : null
+  const plans: FixPlan[] = []
+  for (const r of lastResults) {
+    for (const p of r.fixes) {
+      if (!wanted || wanted.has(p.nodeId)) plans.push(p)
+    }
+  }
+  if (plans.length === 0) {
+    post({ type: 'fix-result', outcomes: [], results: lastResults })
+    return
+  }
+
+  const outcomes = await applyFixes(plans)
+  const fixedNodes = new Set(outcomes.filter((o) => o.ok).map((o) => o.nodeId))
+
+  lastResults = lastResults.map((r) => {
+    const findings = r.findings.filter((f) => !fixedNodes.has(f.nodeId))
+    return {
+      ...r,
+      findings,
+      fixes: r.fixes.filter((p) => !fixedNodes.has(p.nodeId)),
+      summary: recountSummary(findings, r.summary)
+    }
+  })
+
+  const failed = outcomes.filter((o) => !o.ok).length
+  if (failed > 0) figma.notify(`${failed}건은 수정하지 못했습니다.`)
+  post({ type: 'fix-result', outcomes, results: lastResults })
 }
 
 export default function (): void {
   showUI({ width: 480, height: 720 })
 
-  figma.on('selectionchange', () => {
-    sendSelectionChanged().catch(() => {})
-  })
+  figma.on('selectionchange', () => sendSelectionChanged())
 
   figma.ui.onmessage = async (msg: UiToMainMessage) => {
     try {
@@ -136,20 +156,19 @@ export default function (): void {
           break
         }
         case 'run-audit':
-          await runAudit(msg.reAudit)
+          await runAudit()
           break
-        case 'request-history': {
-          const historyKeys = await listHistoryKeys()
-          const history = (
-            await Promise.all(historyKeys.map((k) => figma.clientStorage.getAsync(k)))
-          ).filter(Boolean) as AuditResult[]
-          post({ type: 'history-result', history })
+        case 'apply-fixes':
+          await handleApplyFixes(msg.nodeIds)
           break
-        }
+        case 'go-back':
+          lastResults = []
+          sendSelectionChanged()
+          break
         case 'focus-node': {
           const node = await figma.getNodeByIdAsync(msg.nodeId)
           if (!node || !('x' in node)) {
-            figma.notify('해당 요소를 찾을 수 없다 — 이후 편집으로 삭제됐을 수 있다.')
+            figma.notify('해당 요소를 찾을 수 없습니다 — 이후 편집으로 삭제됐을 수 있습니다.')
             break
           }
           const sceneNode = node as SceneNode

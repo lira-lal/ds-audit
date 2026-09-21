@@ -4,7 +4,7 @@
 // `claude -p`(Claude Code CLI, 이미 로그인된 구독)를 실행해서 결과를 돌려준다.
 // 그래서 API 키가 필요 없고 구독 사용량으로 처리된다.
 
-import type { AuditResult, Finding, ModelId, PreviousItemStatus, Summary, UpdateSuggestion } from './types'
+import type { AuditResult, Finding, ModelId, Summary, UpdateSuggestion } from './types'
 import { SYSTEM_PROMPT } from './promptData.generated'
 
 const RELAY_SERVER_URL = 'http://localhost:8787'
@@ -15,15 +15,12 @@ interface JudgeInput {
   fileKey: string
   nodeId: string
   frameName: string
-  previousResult?: AuditResult
 }
 
 interface RawStructuredResult {
   findings: Finding[]
   summary: Summary
   updateSuggestions: UpdateSuggestion[]
-  previousItemsStatus?: PreviousItemStatus[]
-  newFindings?: Finding[]
 }
 
 interface HealthResponse {
@@ -81,9 +78,7 @@ export async function testConnection(): Promise<{ ok: boolean; message: string }
 }
 
 export async function judgeFrame(input: JudgeInput): Promise<AuditResult> {
-  const userContent = input.previousResult
-    ? `이전 검수 결과(JSON):\n${JSON.stringify(input.previousResult, null, 2)}\n\n재검수 대상 프레임 데이터(JSON):\n${input.extractedFrameJson}\n\n위 데이터로 재검수해라. previousItemsStatus와 newFindings 둘 다 채워라.`
-    : `검수 대상 프레임 데이터(JSON):\n${input.extractedFrameJson}`
+  const userContent = `검수 대상 프레임 데이터(JSON):\n${input.extractedFrameJson}`
 
   let res: Response
   try {
@@ -120,8 +115,9 @@ export async function judgeFrame(input: JudgeInput): Promise<AuditResult> {
     findings: parsed.findings,
     summary: parsed.summary,
     updateSuggestions: parsed.updateSuggestions,
-    previousItemsStatus: parsed.previousItemsStatus,
-    newFindings: parsed.newFindings,
+    // 수정 계획은 모델이 아니라 code.ts가 구조 데이터로 계산해서 채운다
+    fixes: [],
+    blocked: [],
     savedAt: '' // code.ts에서 new Date().toISOString()으로 채운다
   }
 }

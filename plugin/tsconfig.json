@@ -1,7 +1,13 @@
 {
   "extends": "@create-figma-plugin/tsconfig",
-  "include": ["src"],
+  "include": [
+    "src"
+  ],
   "compilerOptions": {
-    "typeRoots": ["./node_modules/@figma", "./node_modules/@types"]
+    "typeRoots": [
+      "./node_modules/@figma",
+      "./node_modules/@types"
+    ],
+    "jsxFragmentFactory": "Fragment"
   }
 }
